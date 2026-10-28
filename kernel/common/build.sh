@@ -58,6 +58,16 @@ if ! skip boot && [ "$KIND" = phone ]; then
 	FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE PAYLOAD_BASE=$PAYLOAD_BASE PAYLOAD_MAX=$PAYLOAD_MAX UEFI_FD=$UEFI_FD DTB=$DTB UEFI_TARGET=$UEFI_TARGET \
 		python3 mkxnuimg.py -p out/usb-payload.bin -o out/$DEVICE-boot.img
 	echo "build: out/$DEVICE-boot.img -- boot it with: fastboot boot out/$DEVICE-boot.img (or common/run.sh $DEVICE)"
+
+	# For Samsung Exynos devices: package Odin-flashable tar.md5 archive (recovery only, no vbmeta)
+	if [[ "$DEVICE" == *"m20"* ]] || [[ "$DEVICE" == *"y2s"* ]]; then
+		cp -f "out/$DEVICE-boot.img" "out/recovery.img"
+		(cd out && tar -H ustar -c recovery.img > "$DEVICE-recovery.tar" && \
+		 cp -f "$DEVICE-recovery.tar" "$DEVICE-recovery.tar.md5" && \
+		 md5sum -t "$DEVICE-recovery.tar.md5" >> "$DEVICE-recovery.tar.md5" && \
+		 rm -f recovery.img)
+		echo "build: out/$DEVICE-recovery.tar.md5 -- flash in Odin AP slot (or heimdall flash --RECOVERY out/$DEVICE-boot.img)"
+	fi
 fi
 
 layout_args=()

@@ -83,4 +83,11 @@ try:
                            '--header_version', str(hdr), *extra, '-o', args.output])
 finally:
     os.unlink(kernel)
+
+# Samsung Exynos sboot requires the SEANDROIDENFORCE trailer to prevent boot validation failure
+if os.environ.get('SEANDROIDENFORCE') == '1' or 'm20' in TARGET or 'y2s' in TARGET:
+    with open(args.output, 'ab') as f:
+        f.write(b'SEANDROIDENFORCE')
+    print(f'appended SEANDROIDENFORCE trailer to {args.output}')
+
 print(f'{args.output}: {os.path.getsize(args.output)} bytes (shim {len(shim)}, uncompressed {len(blob)})')
