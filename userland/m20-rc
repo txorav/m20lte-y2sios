@@ -1,0 +1,7 @@
+# Commands run by init in the M20_BRINGUP=1 monolithic root.
+#
+# There is no iOS launchd in this image: init has already run its kernel/user-space checks,
+# and after this file it halts (reboot(RB_HALT)), which brings the loader back so it can save
+# the combined log. Keep this list to programs that are actually in the image; a missing
+# program is reported and does not stop the rest.
+/bin/hello

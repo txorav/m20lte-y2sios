@@ -56,15 +56,42 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
  */
 static TUNABLE(uint32_t, gFlip, "fb_flip", 0);
 static TUNABLE(uint32_t, gDPU, "fb_dpu", 0);
-#define DPU_DECON_F_PHYS        0x19050000ULL
+/*
+ * fb_soc: 0 = Exynos 990 / y2s (the original addresses), 2 = Exynos 7904 /
+ * m20lte. Only the block bases move; the register offsets and the DPU
+ * programming sequence are still the 990's. The accelerated paths
+ * (fb_flip/fb_scaler/fb_te/fb_bl) are therefore refused on m20lte until the
+ * 7885/7904 DPU sequence is ported -- the CPU-copy path needs none of them.
+ */
+static TUNABLE(uint32_t, gSoc, "fb_soc", 0);
+
+struct fb_soc_bases {
+	uint64_t decon, dma, dpp, dsim;
+	const char *name;
+};
+
+static const struct fb_soc_bases *
+fb_bases(void)
+{
+	static const struct fb_soc_bases y2s = {
+		0x19050000ULL, 0x19090000ULL, 0x19040000ULL, 0x190C0000ULL, "y2s"
+	};
+	static const struct fb_soc_bases m20lte = {
+		0x14860000ULL, 0x148B0000ULL, 0x14850000ULL, 0x14870000ULL, "m20lte"
+	};
+
+	return gSoc == 2 ? &m20lte : &y2s;
+}
+
+#define DPU_DECON_F_PHYS        (fb_bases()->decon)
 /*
  * DPU_DMA: the common block at + 0, the IDMA of channel c at + 0x1000 * (c + 1) (dpp_drv.c: a dpp node's
  * first reg is its DMA; 0x19041000.. is the DPP colour pipe). Both read 0 to the non-secure side until
  * the DPU's D-TZPC is restored: fb_dpu=2 asks the secure monitor for that, as Linux does when it powers
  * pd-dpu on (pmucal_local.c, need_smc 0x19010204) and as redwood_mali.c does for the GPU's domain.
  */
-#define DPU_DMA_PHYS            0x19090000ULL
-#define DPU_DPP_PHYS            0x19040000ULL           /* DPP of channel c at + 0x1000 * (c + 1) */
+#define DPU_DMA_PHYS            (fb_bases()->dma)
+#define DPU_DPP_PHYS            (fb_bases()->dpp)       /* DPP of channel c at + 0x1000 * (c + 1) */
 #define DPU_DMA_VERSION         0x0000
 #define DPU_DMA_QCH_EN          0x000C
 #define DPU_DMA_GLB_CGEN_CH0    0x0040
@@ -206,7 +233,7 @@ extern "C" void gic_v3_spi_unmask(uint32_t intid);
  * latched by F7 0F (Samsung's exynos990 kernel, panel/s6e3hab/s6e3hab_hubble3_a3_s0_panel*.h).
  */
 static TUNABLE(uint32_t, gBL, "fb_bl", 0);
-#define DSIM0_PHYS              0x190C0000ULL
+#define DSIM0_PHYS              (fb_bases()->dsim)
 #define DSIM_LINK_STATUS1       0x000C
 #define DSIM_CONFIG             0x004C
 #define DSIM_INTSRC             0x0050
@@ -827,6 +854,11 @@ IOMobileFramebuffer::start(IOService * provider)
 	    fPanelWidth, fPanelHeight, fRowBytes);
 	fWin = -1;
 	fPanel = fBase;
+	if (gSoc == 2 && (gFlip || gDPU || gScaler || gTE || gBL)) {
+		IOLog("MiniIOMobileFramebuffer: m20lte: fb_flip/fb_dpu/fb_scaler/fb_te/fb_bl are not ported to the "
+		    "7885/7904 DPU; using the CPU-copy path\n");
+		gFlip = gDPU = gScaler = gTE = gBL = 0;
+	}
 	if (gFlip || gDPU || gScaler) {
 		dpuProbe();
 	}

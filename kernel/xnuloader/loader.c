@@ -46,8 +46,14 @@ struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
 #define PANIC_LOG_SIZE      0x80000u
 #define NVRAM_BANK_SIZE     0x2000u
 #define PANIC_LOG_BASE      (PAYLOAD_BASE + PAYLOAD_MAX_SIZE)
-/* Staging area for images the host sends over USB (kernel, root image). */
-#define DOWNLOAD_BASE       0xF0000000ULL
+/*
+ * Staging for images the host sends over USB (kernel, root image) and for a
+ * kernel read from a partition. It must be allocated before choose_window(),
+ * otherwise the kernel window can contain the staging buffer and the segment
+ * copy overwrites the Mach-O it is reading from. There is deliberately no
+ * fixed fallback address: on a 2 GiB M20 every plausible fixed address is
+ * inside DRAM that choose_window() may claim.
+ */
 #define DOWNLOAD_MAX_SIZE   0x01800000ULL         /* 24 MB: m20 kernel staging, clear of the display */
 
 /* ------------------------------------------------------------------------ */
@@ -93,6 +99,11 @@ struct segment_command_64 {
 static efi_system_table *ST;
 static efi_boot_services *BS;
 static efi_handle IMAGE;
+
+/* Partition-read kernel staging, allocated before the kernel window is claimed. */
+static uint8_t *kernel_stage;
+static uint64_t kernel_stage_size;
+static uint64_t kernel_image_size;
 
 static char log_buf[32768];
 static uint32_t log_len;
@@ -2803,6 +2814,7 @@ install_exception_hook(void)
 
 struct payload_info {
 	const uint8_t *kernel;
+	uint32_t kernel_size;
 	const uint8_t *ramdisk;
 	uint32_t ramdisk_size;
 	const char *cmdline;
@@ -2863,6 +2875,7 @@ parse_payload(struct payload_info *pi, int verbose)
 			pi->ramdisk_size = e->size;
 		} else if (str_eq(e->name, "kernel")) {
 			pi->kernel = p + sizeof(*e);
+			pi->kernel_size = e->size;
 		} else if (str_eq(e->name, "cmdline")) {
 			pi->cmdline = text;
 		} else if (str_eq(e->name, "physbase")) {
@@ -3090,6 +3103,34 @@ reserve_display_pool(void)
 	print("display pool: not even 64 MB below 4 GB\n");
 }
 
+/*
+ * Reserve the buffer a partition kernel is read into. AllocateAnyPages keeps
+ * UEFI free to place it anywhere in usable DRAM; the only requirement is that
+ * it happens before choose_window() claims the kernel's window.
+ */
+static int
+ensure_kernel_stage(uint64_t need)
+{
+	uint64_t at = 0;
+
+	need = (need + 0xFFF) & ~0xFFFULL;
+	if (need == 0 || need > DOWNLOAD_MAX_SIZE) {
+		print("kernel staging: %x is outside the %x limit\n", need, DOWNLOAD_MAX_SIZE);
+		return 0;
+	}
+	if (kernel_stage != NULL && kernel_stage_size >= need) {
+		return 1;
+	}
+	if (EFI_ERROR(BS->allocate_pages(AllocateAnyPages, EfiLoaderData, (need + 0xFFF) >> 12, &at))) {
+		print("kernel staging: cannot allocate %x bytes\n", need);
+		return 0;
+	}
+	kernel_stage = (uint8_t *)(uintptr_t)at;
+	kernel_stage_size = need;
+	print("kernel staging at %x size %x\n", at, need);
+	return 1;
+}
+
 static int
 choose_window(const struct payload_info *pi)
 {
@@ -3101,6 +3142,15 @@ choose_window(const struct payload_info *pi)
 
 	if (win_size != 0) {
 		return 1;
+	}
+	/*
+	 * A kernel that lives on a partition is read into a staging buffer that
+	 * must not end up inside the window this function is about to claim.
+	 * Allocate it first, then the allocator removes it from the conventional
+	 * memory that choose_window() scans.
+	 */
+	if (pi->kpart[0] != 0 && !ensure_kernel_stage(pi->ksize != 0 ? pi->ksize : DOWNLOAD_MAX_SIZE)) {
+		return 0;
 	}
 	if (EFI_ERROR(BS->get_memory_map(&map_size, map_buf, &map_key, &desc_size, &desc_ver))) {
 		print("GetMemoryMap failed\n");
@@ -3183,6 +3233,14 @@ read_partition_into(const char *part, uint64_t off, void *dest, uint64_t len)
 		print("storage: bad offset %x\n", off);
 		return 0;
 	}
+	/* ReadBlocks wants whole blocks; callers bound the useful bytes separately. */
+	len = (len + bs - 1) / bs * bs;
+	if (len == 0 || off / bs > bio->media->last_block ||
+	    len / bs > bio->media->last_block + 1 - off / bs) {
+		print("storage: read %x at %x is outside '%s'\n", len, off, part);
+		return 0;
+	}
+	left = len;
 	lba = off / bs;
 	while (left != 0) {
 		uint64_t chunk = left > (4ULL << 20) ? (4ULL << 20) : left;
@@ -3198,19 +3256,22 @@ read_partition_into(const char *part, uint64_t off, void *dest, uint64_t len)
 }
 
 static int
-load_kernel_from_partition(const char *part, uint64_t off)
+load_kernel_from_partition(const char *part, uint64_t off, uint64_t requested)
 {
-	uint8_t *dest = (uint8_t *)DOWNLOAD_BASE;
-	uint64_t size = DOWNLOAD_MAX_SIZE;
+	uint64_t size = requested != 0 ? requested : DOWNLOAD_MAX_SIZE;
 
-	if (!read_partition_into(part, off, dest, size)) {
+	if (!ensure_kernel_stage(size)) {
 		return 0;
 	}
-	if (*(const uint32_t *)dest != 0xfeedfacf) {
-		print("kernel: bad Mach-O magic %x at '%s'+%x\n", (uint64_t)*(const uint32_t *)dest, part, off);
+	if (!read_partition_into(part, off, kernel_stage, size)) {
 		return 0;
 	}
-	print("kernel: read up to %x bytes from '%s' at %x (ksize=0 means the staging default)\n", size, part, off);
+	if (*(const uint32_t *)kernel_stage != 0xfeedfacf) {
+		print("kernel: bad Mach-O magic %x at '%s'+%x\n", (uint64_t)*(const uint32_t *)kernel_stage, part, off);
+		return 0;
+	}
+	kernel_image_size = size;
+	print("kernel: read %x bytes from '%s' at %x (ksize %x)\n", size, part, off, requested);
 	return 1;
 }
 
@@ -3234,13 +3295,18 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		return 0;
 	}
 	if (pi.kernel == NULL && pi.kpart[0] != 0) {
-		if (!load_kernel_from_partition(pi.kpart, pi.koff)) {
+		if (!load_kernel_from_partition(pi.kpart, pi.koff, pi.ksize)) {
 			return 0;
 		}
-		pi.kernel = (const uint8_t *)DOWNLOAD_BASE;
+		pi.kernel = kernel_stage;
+		pi.kernel_size = (uint32_t)kernel_image_size;
 	}
 	if (pi.kernel == NULL) {
 		print("no kernel in payload\n");
+		return 0;
+	}
+	if (pi.kernel_size == 0) {
+		print("kernel entry has no size\n");
 		return 0;
 	}
 	if (pi.ramdisk == NULL && pi.rpart[0] != 0) {
@@ -3250,20 +3316,49 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		checkpoint = pi.checkpoint;
 	}
 	const uint8_t *kernel = pi.kernel;
+	const uint64_t kernel_size = pi.kernel_size;
 	const struct mach_header_64 *mh = (const struct mach_header_64 *)kernel;
+	if (kernel_size < sizeof(*mh)) {
+		print("kernel image %x is smaller than a Mach-O header\n", kernel_size);
+		return 0;
+	}
 	if (mh->magic != MH_MAGIC_64) {
 		print("kernel is not a 64-bit Mach-O\n");
+		return 0;
+	}
+	if (mh->ncmds == 0 || mh->ncmds > 128 ||
+	    mh->sizeofcmds < sizeof(struct load_command) ||
+	    mh->sizeofcmds > kernel_size - sizeof(*mh)) {
+		print("kernel has a bad load-command table (ncmds %d sizeofcmds %x)\n",
+		    (uint64_t)mh->ncmds, (uint64_t)mh->sizeofcmds);
 		return 0;
 	}
 
 	/* --- kernel extent -------------------------------------------------- */
 	uint64_t vm_lo = ~0ULL, vm_hi = 0, entry_va = 0;
+	const uint8_t *cmd_end = (const uint8_t *)(mh + 1) + mh->sizeofcmds;
 	const struct load_command *lc = (const struct load_command *)(mh + 1);
 	for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const void *)((const uint8_t *)lc + lc->cmdsize)) {
+		if ((const uint8_t *)lc + sizeof(*lc) > cmd_end ||
+		    lc->cmdsize < sizeof(*lc) || (lc->cmdsize & 7) != 0 ||
+		    (const uint8_t *)lc + lc->cmdsize > cmd_end) {
+			print("kernel load command %d overruns the table\n", (uint64_t)i);
+			return 0;
+		}
 		if (lc->cmd == LC_SEGMENT_64) {
 			const struct segment_command_64 *sg = (const void *)lc;
+			if (lc->cmdsize < sizeof(*sg)) {
+				print("kernel segment command %d is too small\n", (uint64_t)i);
+				return 0;
+			}
 			if (sg->vmsize == 0) {
 				continue;
+			}
+			if (sg->filesize > sg->vmsize ||
+			    sg->vmaddr + sg->vmsize < sg->vmaddr ||
+			    sg->fileoff > kernel_size || sg->filesize > kernel_size - sg->fileoff) {
+				print("kernel segment '%.16s' is out of bounds\n", sg->segname);
+				return 0;
 			}
 			if (sg->vmaddr < vm_lo) {
 				vm_lo = sg->vmaddr;
@@ -3273,11 +3368,18 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			}
 		} else if (lc->cmd == LC_UNIXTHREAD) {
 			/* cmd, cmdsize, flavor, count, x0..x28, fp, lr, sp, pc */
+			if (lc->cmdsize < 16 + 33 * 8) {
+				print("kernel thread command is too small\n");
+				return 0;
+			}
 			entry_va = ((const uint64_t *)((const uint8_t *)lc + 16))[32];
 		}
 	}
-	print("kernel va %x..%x entry %x\n", vm_lo, vm_hi, entry_va);
-	if (vm_lo < KERNEL_VIRT_BASE + KERNEL_LINK_OFFSET || entry_va == 0) {
+	print("kernel va %x..%x entry %x (image %x bytes)\n", vm_lo, vm_hi, entry_va, kernel_size);
+	if (vm_lo == ~0ULL || vm_hi <= vm_lo || vm_hi - vm_lo > MAX_MEM_SIZE ||
+	    vm_lo < KERNEL_VIRT_BASE + KERNEL_LINK_OFFSET ||
+	    vm_hi > KERNEL_VIRT_BASE + MAX_MEM_SIZE ||
+	    entry_va < vm_lo || entry_va >= vm_hi) {
 		print("unexpected kernel layout\n");
 		return 0;
 	}
@@ -3288,6 +3390,11 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint64_t phys_base = win_base;
 	uint64_t slide = phys_base - KERNEL_VIRT_BASE; /* pa = va + slide */
 	uint64_t kern_lo = vm_lo + slide, kern_hi = (vm_hi + slide + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
+	uint64_t win_end = win_base + win_size;
+	if (kern_lo < win_base || kern_hi < kern_lo || kern_hi > win_end) {
+		print("kernel does not fit the claimed window (%x..%x in %x..%x)\n", kern_lo, kern_hi, win_base, win_end);
+		return 0;
+	}
 	/* The ramdisk must sit inside the kernel's static mapping, i.e. below topOfKernelData. */
 	uint64_t rd_pa = kern_hi;
 	uint64_t rd_size = (pi.ramdisk_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
@@ -3330,6 +3437,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			print("kernel and ramdisk overlap the resident image\n");
 			return 0;
 		}
+		if (res_pa + res_size < res_pa || res_pa + res_size > win_end) {
+			print("resident image at %x+%x is outside the window\n", res_pa, res_size);
+			return 0;
+		}
 		if (rd_size == 0) {
 			rd_pa = res_pa;
 			rd_size = res_size;
@@ -3345,7 +3456,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint64_t ba_pa = dt_pa + dt_max;
 	uint64_t top = ba_pa + PAGE_SIZE_MAX;
 
-	if (win_size < top - phys_base + 0x4000000ULL) {
+	if (win_size < top - phys_base + 0x4000000ULL || top > win_end || top < ba_pa) {
 		print("not enough contiguous RAM\n");
 		return 0;
 	}
@@ -4190,6 +4301,28 @@ fb_reply_data(uint64_t len)
 	usb_tx((const uint8_t *)msg, 12);
 }
 
+/* "0x..." for fb_reply, which takes text; the value is small enough for one static buffer. */
+static const char *
+hex_string(uint64_t value)
+{
+	static char text[19];
+	static const char hex[] = "0123456789abcdef";
+	int shift = 60;
+	int pos = 2;
+
+	text[0] = '0';
+	text[1] = 'x';
+	while (shift > 0 && ((value >> shift) & 0xf) == 0) {
+		shift -= 4;
+	}
+	while (shift >= 0) {
+		text[pos++] = hex[(value >> shift) & 0xf];
+		shift -= 4;
+	}
+	text[pos] = 0;
+	return text;
+}
+
 static int
 starts_with(const char *s, const char *prefix)
 {
@@ -4228,7 +4361,10 @@ fb_command(char *cmd)
 			} else if (str_eq(var, "version")) {
 				fb_reply("OKAY", "0.5");
 			} else if (str_eq(var, "max-download-size")) {
-				fb_reply("OKAY", download_to_ramdisk ? "0xffffffff" : stage_buf != NULL ? "0x05f00000" : "0x03f00000");
+				uint64_t max = download_to_ramdisk
+					? (win_size > RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE ? win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE : 0)
+					: (stage_buf != NULL ? stage_size : 0);
+				fb_reply("OKAY", hex_string(max));
 			} else if (str_eq(var, "result")) {
 				fb_reply("OKAY", last_result);
 			} else if (str_eq(var, "screen") && SCREEN.base != 0) {
@@ -4260,15 +4396,23 @@ fb_command(char *cmd)
 			fb_reply("OKAY", "");
 		} else if (starts_with(cmd, "download:")) {
 			uint64_t total = parse_number(cmd + 9, 16), got = 0;
-			uint64_t limit = stage_buf != NULL ? stage_size : DOWNLOAD_MAX_SIZE;
-			uint8_t *dest = stage_buf != NULL ? stage_buf : (uint8_t *)DOWNLOAD_BASE;
 			int to_ramdisk = download_to_ramdisk;
+			uint64_t limit = 0;
+			uint8_t *dest = NULL;
 
 			download_to_ramdisk = 0;
 			if (to_ramdisk) {
-				limit = win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE;
+				limit = win_size > RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE
+					? win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE : 0;
 				dest = (uint8_t *)(win_base + RESIDENT_RD_OFFSET);
 				resident_rd_size = 0;
+			} else {
+				limit = stage_buf != NULL ? stage_size : 0;
+				dest = stage_buf;
+			}
+			if (dest == NULL || limit == 0) {
+				fb_reply("FAIL", "no staging buffer");
+				return;
 			}
 			if (total == 0 || total > limit) {
 				fb_reply("FAIL", "bad size");
@@ -4957,12 +5101,15 @@ ufn_start(void)
 	return 1;
 }
 
-/* the last run's log, as it was saved: recovery + 16 MB, NULs and all (the host drops them) */
+/* the last run's log, as it was saved: recovery + LOG_OFFSET, NULs and all (the host drops them) */
 static int
 stage_last_log(void)
 {
-	uint8_t *buf = stage_buf != NULL ? stage_buf : (uint8_t *)DOWNLOAD_BASE;
+	uint8_t *buf = stage_buf;
 
+	if (buf == NULL) {
+		return 0;
+	}
 	if (!read_partition_into("recovery", LOG_OFFSET, buf, 8ULL << 20)) {
 		return 0;
 	}

@@ -55,13 +55,20 @@
   gSiliciumPkgTokenSpaceGuid.PcdFrameBufferHeight|2340
   gSiliciumPkgTokenSpaceGuid.PcdFrameBufferStride|1088
   gSiliciumPkgTokenSpaceGuid.PcdFrameBufferColorDepth|32
-  gSiliciumPkgTokenSpaceGuid.PcdFrameBufferColorDepth|32
 
 [LibraryClasses]
   #
   # Memory Libraries
   #
   MemoryMapLib|m20ltePkg/Library/MemoryMapLib/MemoryMapLib.inf
+
+  #
+  # Storage Libraries
+  #
+  # S5E7870Pkg provides the non-null dwmmc/eMMC board init used by MshcDxe.
+  # The default SamsungPkg.dsc.inc maps PlatformMshcLib to the null library.
+  #
+  PlatformMshcLib|S5E7870Pkg/Library/PlatformMshcLib/PlatformMshcLib.inf
 
   #
   # Input Libraries

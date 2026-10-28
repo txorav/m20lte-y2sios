@@ -14,8 +14,10 @@ __pycache__/
 out/
 BUILD/
 xnu-src/
-xnu-deps/build/
-xnu-deps/host-macos/bin/xcrun
+xnu-deps/
+kernel/xnu-deps/
+apfs-work/
+kernel/apfs-work/
 ios165/
 prebuilt/
 Mu-Silicium/

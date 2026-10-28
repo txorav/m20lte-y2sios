@@ -19,6 +19,7 @@ ap.add_argument('--rdres', default='', help='hex size of a root image already pl
 ap.add_argument('--checkpoint', default='', help='kernel checkpoint to stop at; 999 = loader self test')
 ap.add_argument('--kpart', default='', help='GPT partition holding the kernel (e.g. recovery)')
 ap.add_argument('--koff', default='', help='hex byte offset of the kernel inside --kpart')
+ap.add_argument('--ksize', default='', help='hex byte count to read from --kpart (0/empty: staging default)')
 ap.add_argument('--rpart', default='', help='GPT partition holding the root ramdisk')
 ap.add_argument('--roff', default='', help='hex byte offset of the ramdisk inside --rpart')
 ap.add_argument('--rsize', default='', help='hex size of the ramdisk')
@@ -50,6 +51,8 @@ if args.kpart:
     add('kpart', args.kpart.encode() + b'\0')
 if args.koff:
     add('koff', args.koff.lower().replace('0x', '').encode() + b'\0')
+if args.ksize:
+    add('ksize', args.ksize.lower().replace('0x', '').encode() + b'\0')
 if args.rpart:
     add('rpart', args.rpart.encode() + b'\0')
 if args.roff:

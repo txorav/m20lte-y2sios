@@ -3,7 +3,7 @@
 #
 #   hello            one raw-syscall program; as a RAM disk on its own it boots through mockfs
 #   root.apfs        the small image: our init and test programs, etc/rc, and the launchd jobs
-#                    (LaunchDaemons/), an APFS container (../tools/apfs/mkapfs.py). It travels in
+#                    (LaunchDaemons/), an APFS container (kernel/tools/apfs/mkapfs.py). It travels in
 #                    the payload next to the kernel (the second RAM disk, /dev/md1) and is mounted
 #                    on /redwood. Rebuilt every time.
 #                      RC=<file>    etc/rc: rc.launchd (default) hands process 1 to the iOS launchd
@@ -73,7 +73,11 @@
 #                    the images are then made of them and of the iOS files alone (python3)
 #   CHECK=1          check every image (every container) as it is made: apfsck has to find it clean and
 #                    the kernel's apfs_lib has to read every volume back as the directory it was made of
-#                    (../tools/apfs/check-image.sh; the system image takes a few minutes more)
+#                    ($APFS/check-image.sh; the system image takes a few minutes more)
+#   M20_BRINGUP=1    build a self-contained APFS root for the Galaxy M20 port: /sbin/launchd is our
+#                    init (not stage0), there is no iOS launchd, no system.apfs and no /redwood.
+#                    Upload the image as the loader's RAM disk (md0) with `xl ramdisk userland/root.apfs`.
+#                    The image is checked against the 4 MiB root slot of the recovery layout.
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 source ../xnu-env.sh
@@ -83,6 +87,8 @@ LD="-Wl,-e,_start -Wl,-pagezero_size,0x100000000"
 DYN="xnu-clang -arch arm64 -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1"
 IOS=../ios165
 CACHE=$IOS/20F66__iPhone10,3_6
+# The APFS tools live under kernel/tools in this tree (the y2sios layout had them at ../tools).
+APFS=${APFS:-../kernel/tools/apfs}
 # ios165/rootfs and ios165/cryptex must be this copy's own directories of hard links, the way
 # tools/new-workspace.sh makes them. A symlink to another copy's tree makes sysroot a symlink too, because
 # cp -a does not follow one, and then every rm -rf and mv below edits the shared extraction in place. That
@@ -168,7 +174,7 @@ fi
 
 # --- the small image ------------------------------------------------------------------------------
 rm -rf root
-mkdir -p root/sbin root/bin root/etc root/share root/LaunchDaemons
+mkdir -p root/sbin root/bin root/etc root/share root/LaunchDaemons root/dev root/private/var
 cp obj/init root/sbin/init
 cp obj/child root/bin/child
 # The data volume into the flash and back (src/var_store.c), and the job that saves it when a run
@@ -192,7 +198,7 @@ for d in $EXTRA_SHARE; do
 	[ -d "$d" ] || { echo "build.sh: EXTRA_SHARE: $d is not a directory"; exit 1; }
 	cp -rL "$d" root/share/
 done
-if [ -d $IOS/rootfs/usr/lib ]; then
+if [ -z "$M20_BRINGUP" ] && [ -d $IOS/rootfs/usr/lib ]; then
 	if [ -z "$PREBUILT" ]; then
 		# ordinary dynamically linked programs of our own, built against the iOS SDK
 		$DYN -o obj/hello_dyn src/hello_dyn.c
@@ -678,10 +684,30 @@ if [ -f root/bin/bluetool_stub ]; then
 	  codesign -s - -f root/bin/bluetool_stub 2>/dev/null; } ||
 		echo "build.sh: bluetool_stub is unsigned: launchd will panic on com.apple.BlueTool"
 fi
+# M20_BRINGUP=1: the monolithic root. There is no iOS rootfs and no launchd in this image, so
+# /sbin/launchd is our init itself; it runs its checks, runs etc/rc, and halts. Nothing here
+# depends on /redwood, stage0 or /dev/md1. The image is the loader's RAM disk (md0).
+if [ -n "$M20_BRINGUP" ]; then
+	echo "build.sh: M20_BRINGUP: monolithic APFS root, no iOS launchd"
+	rm -rf root/LaunchDaemons root/lib root/xpc root/hal root/empty
+	cp obj/init root/sbin/launchd
+	cp obj/init root/sbin/init
+	cp m20-rc root/etc/rc
+	cp hello root/bin/hello
+	: > root/etc/m20-bringup
+	ln -sfn private/var/tmp root/tmp
+	mkdir -p root/dev root/private/var
+fi
 # the image: zlib where it saves room (a small file whole in its attribute, as Apple keeps them); fw/
 # as it is, which the kernel's drivers use where it lies in memory (bsd/dev/redwood_image.c)
-python3 ../tools/apfs/mkapfs.py -z --plain fw -o root.apfs redwood=root | tail -1
-[ -z "$CHECK" ] || ../tools/apfs/check-image.sh root.apfs redwood=root
+python3 "$APFS/mkapfs.py" -z --plain fw -o root.apfs redwood=root | tail -1
+[ -z "$CHECK" ] || "$APFS/check-image.sh" root.apfs redwood=root
+if [ -n "$M20_BRINGUP" ]; then
+	# layout A: root.apfs is the 4 MiB root slot at recovery+0x1E00000. Catch a regression here,
+	# before an image that cannot fit is uploaded to a phone.
+	python3 ../kernel/tools/layout_check.py m20lte --root root.apfs >/dev/null ||
+		{ echo "build.sh: root.apfs does not fit the m20lte recovery layout" >&2; exit 1; }
+fi
 
 # --- the RAM part of a boot off the flash: FLASHBOOT=1 -> flashboot.apfs --------------------------------
 # With the iOS volume on the phone's flash as the root, all that has to come from RAM is what is not
@@ -741,8 +767,8 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
 		done
 		echo "  the package manager's prefix: $(du -sh flashboot/jb | cut -f1) as /jb of the boot volume"
 	fi
-	python3 ../tools/apfs/mkapfs.py -z --plain fw -o flashboot.boot.apfs Boot=flashboot | tail -1
-	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh flashboot.boot.apfs Boot=flashboot
+	python3 "$APFS/mkapfs.py" -z --plain fw -o flashboot.boot.apfs Boot=flashboot | tail -1
+	[ -z "$CHECK" ] || "$APFS/check-image.sh" flashboot.boot.apfs Boot=flashboot
 	# the third container: Apple's App cryptex as it is (10 MB; fetch.sh), for the boot volume's Cryptexes/App
 	APP=""
 	[ -f $IOS/cryptex-app.dmg ] && APP=$IOS/cryptex-app.dmg
@@ -751,8 +777,8 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
 	elif [ -n "$CRYPTEX_IMAGE" ]; then
 		cat flashboot.boot.apfs "$CRYPTEX_IMAGE" $APP > flashboot.apfs
 	else
-		python3 ../tools/apfs/mkapfs.py -z -o flashboot.os.apfs OS=flashboot.os | tail -1
-		[ -z "$CHECK" ] || ../tools/apfs/check-image.sh flashboot.os.apfs OS=flashboot.os
+		python3 "$APFS/mkapfs.py" -z -o flashboot.os.apfs OS=flashboot.os | tail -1
+		[ -z "$CHECK" ] || "$APFS/check-image.sh" flashboot.os.apfs OS=flashboot.os
 		cat flashboot.boot.apfs flashboot.os.apfs $APP > flashboot.apfs
 		rm -f flashboot.os.apfs
 	fi
@@ -876,7 +902,7 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	done
 	# zlib where it saves room, as Apple keeps the root (a small file whole in its attribute): 5.4 GB of
 	# files in 2.5 GB, what fits into the phone's RAM beside iOS
-	python3 ../tools/apfs/mkapfs.py -z -o system.apfs System=sysroot,manifest=$IOS/system.manifest | tail -1
-	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh system.apfs System=sysroot,manifest=$IOS/system.manifest
+	python3 "$APFS/mkapfs.py" -z -o system.apfs System=sysroot,manifest=$IOS/system.manifest | tail -1
+	[ -z "$CHECK" ] || "$APFS/check-image.sh" system.apfs System=sysroot,manifest=$IOS/system.manifest
 	rm -rf sysroot
 fi

@@ -7,7 +7,7 @@
 // The stock boot shim copies the whole FD there, so the payload arrives with it.
 //
 #define XNU_PAYLOAD_BASE      0x8F100000ULL   /* m20 FD base + 0x100000 */
-#define XNU_PAYLOAD_MAX_SIZE  0x00100000ULL   /* 1 MB: 0x100000..0x200000 of the FD */
+#define XNU_PAYLOAD_MAX_SIZE  0x00080000ULL   /* 512 KB: keep in step with loader.c */
 #define XNU_PAYLOAD_MAGIC     0x50554E58 // "XNUP"
 
 typedef struct {
@@ -24,7 +24,10 @@ typedef struct {
 } XNU_PAYLOAD_ENTRY;
 
 // Raw GPT partition that receives the text log (read back from Android).
-#define XNU_LOG_PARTITION  L"logdump"
+// m20lte has no logdump; recovery's first 4 MiB hold the boot image, so the
+// log starts at +4 MiB (same policy as kernel/xnuloader/loader.c).
+#define XNU_LOG_PARTITION  L"recovery"
+#define XNU_LOG_OFFSET     0x00400000ULL
 
 #define XNU_MARKER_MAGIC  0x584E5521 // "XNU!"
 

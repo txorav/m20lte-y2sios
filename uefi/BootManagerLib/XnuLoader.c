@@ -3,8 +3,8 @@
 
   Runs when BDS finds nothing to boot. Collects what the real loader will need
   (exception level, CPU feature registers, framebuffer, memory map, payload),
-  writes it as text to the raw "logdump" partition so it can be read back from
-  Android over adb, and cold-resets. Nothing is shown to the user on purpose:
+  writes it as text to the raw "recovery" partition at +4 MiB so it can be
+  read back from Android over adb, and cold-resets. Nothing is shown to the user on purpose:
   the phone is driven unattended.
 
   SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -242,7 +242,8 @@ FlushLog ()
   BlockSize = BlockIo->Media->BlockSize;
   WriteSize = ALIGN_VALUE (mLogLen + 1, BlockSize);
 
-  Status = BlockIo->WriteBlocks (BlockIo, BlockIo->Media->MediaId, 0, WriteSize, mLog);
+  Status = BlockIo->WriteBlocks (BlockIo, BlockIo->Media->MediaId,
+                                 XNU_LOG_OFFSET / BlockSize, WriteSize, mLog);
   if (!EFI_ERROR (Status)) {
     BlockIo->FlushBlocks (BlockIo);
   }

@@ -4,12 +4,16 @@ The main technical account is the [README](../README.md). These documents go dee
 
 ## Start here
 
+- [m20lte-port-blueprint.md](m20lte-port-blueprint.md): formal verification, architectural analysis and implementation plan for the Samsung Galaxy M20 (`m20lte`, Exynos 7904).
+- [handoff/2026-10-28-m20lte-handoff.md](handoff/2026-10-28-m20lte-handoff.md): developer handoff, verification tests, bug audit and state for incoming engineers.
+- [research/m20lte-online-artifacts.md](research/m20lte-online-artifacts.md): survey of online artifacts, repositories, kernel dts, and hardware specifications for m20lte.
 - [architecture.md](architecture.md): the layers, the boot flow, the memory map and how a driver is added.
 - [hardware.md](hardware.md): addresses, pins, buses and interrupts for the Exynos 990 S20+.
 - [building.md](building.md): a full build from upstream sources, including the UEFI in a Linux VM.
 - [history/](history/): the original handover and port log, kept as written.
 - [plans/](plans/): the working plans for display, GPU, wireless, audio and standalone operation, and [plans/10-mali2metal.md](plans/10-mali2metal.md), the run log of the evidence loop.
 - [research/](research/): hardware reports on the ABOX, the display controller, Wi-Fi and Bluetooth.
+- [sessions/](sessions/): comprehensive raw and structured session logs for agent reproducibility.
 
 ## A note on dates
 

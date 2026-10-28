@@ -1165,7 +1165,8 @@ Notes:
 2. Run `kernel/common/new-device.sh m20lte <m20.dtb>`; edit the generated profile:
    - `UEFI_TARGET=m20lte`
    - `FD_BASE=0x8F000000`, `FD_SIZE=0x200000`
-   - `PAYLOAD_BASE=0xF0000000` (staging)
+   - `PAYLOAD_BASE=0x8F100000` (inside the FD's unused tail; the old blueprint's
+     `0xF0000000` was a staging address, not where BootShim puts XNUP)
    - `FB_BASE=0xEC000000`
    - `GIC_V2=1`
 3. Create `m20ltePkg` from `a10Pkg`; rename DSC/FDF/GUID/SMBIOS.

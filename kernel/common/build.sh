@@ -55,7 +55,11 @@ if ! skip boot && [ "$KIND" = phone ]; then
 	# the UEFI with the loader inside, the way `xl enter` makes it: the loader then brings up its USB link
 	L=xnuloader/loader.efi; [ -f $L ] || L=prebuilt/loader.efi
 	python3 xnuloader/mkpayload.py -o out/usb-payload.bin loader.efi=$L --usb > /dev/null
-	FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE PAYLOAD_BASE=$PAYLOAD_BASE UEFI_FD=$UEFI_FD DTB=$DTB UEFI_TARGET=$UEFI_TARGET \
+	FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE PAYLOAD_BASE=$PAYLOAD_BASE PAYLOAD_MAX=$PAYLOAD_MAX UEFI_FD=$UEFI_FD DTB=$DTB UEFI_TARGET=$UEFI_TARGET \
 		python3 mkxnuimg.py -p out/usb-payload.bin -o out/$DEVICE-boot.img
 	echo "build: out/$DEVICE-boot.img -- boot it with: fastboot boot out/$DEVICE-boot.img (or common/run.sh $DEVICE)"
 fi
+
+layout_args=()
+[ -f "out/$DEVICE-boot.img" ] && layout_args+=(--embed "out/$DEVICE-boot.img")
+python3 tools/layout_check.py "$DEVICE" "${layout_args[@]}" || die "recovery layout check failed"

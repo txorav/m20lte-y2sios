@@ -1028,6 +1028,13 @@ mount_writable(void)
 	static char skeleton[16384];
 	static const char *const markers[] = { "/private/var/db/diagnostics/.migrated",
 		                               "/private/var/db/diagnostics/timesync/.migrated", "/private/var/db/uuidtext/.migrated" };
+	/* The M20_BRINGUP image has no iOS var.skel: the directories init itself needs. */
+	static const char *const minimal[] = {
+		"/private/var/db", "/private/var/db/diagnostics", "/private/var/db/diagnostics/timesync",
+		"/private/var/db/uuidtext", "/private/var/log", "/private/var/mobile", "/private/var/root",
+		"/private/var/run", "/private/var/tmp"
+	};
+	ssize_t skeleton_len;
 	int ok, fd, made = 0, files = 0;
 	const char *jb;
 	struct stat st;
@@ -1043,7 +1050,17 @@ mount_writable(void)
 	}
 
 	/* the directories of the data volume, as listed in the template that ships with iOS (ios165/mkvarskel.py) */
-	read_whole(in_image("/etc/var.skel"), skeleton, sizeof(skeleton));
+	skeleton_len = read_whole(in_image("/etc/var.skel"), skeleton, sizeof(skeleton));
+	if (skeleton_len < 0) {
+		/* M20_BRINGUP: no iOS template, make the directories the rest of init writes into */
+		for (unsigned i = 0; ok && i < sizeof(minimal) / sizeof(minimal[0]); i++) {
+			if (mkdir(minimal[i], 0755) != 0 && errno != EEXIST) {
+				printf("  %s: %s\n", minimal[i], strerror(errno));
+				ok = 0;
+			}
+			made++;
+		}
+	}
 	for (char *line = skeleton; ok && *line;) {
 		char *end = strchr(line, '\n'), *f[6];
 		int count;
@@ -1095,7 +1112,7 @@ mount_writable(void)
 		close(fd);
 	}
 	printf("  %d directories, %d files\n", made, files);
-	check(ok && made > 50, "create the directories of the data volume");
+	check(ok && (made > 50 || skeleton_len < 0), "create the directories of the data volume");
 
 	/*
 	 * and the package manager's prefix, when the image was built with one (tools/mk-jb.sh): /jb of
@@ -1647,6 +1664,13 @@ main(int argc, char **argv, char **envp)
 	}
 
 	printf("\n=== init: process %d, started as %s ===\n", getpid(), argc > 0 ? argv[0] : "?");
+	{
+		struct stat st;
+
+		if (stat("/etc/m20-bringup", &st) == 0) {
+			printf("init: M20 bring-up root: no launchd.ios, run etc/rc, then halt\n");
+		}
+	}
 	{
 		const char *dev = boot_arg("root_apfs");
 

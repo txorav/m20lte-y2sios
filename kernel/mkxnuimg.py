@@ -26,7 +26,7 @@ def env_int(name, default):
     return int(v, 0) if v else default
 TARGET = os.environ.get('UEFI_TARGET') or 'redwood'
 FD_BASE, FD_SIZE = env_int('FD_BASE', 0x9FD00000), env_int('FD_SIZE', 0x200000)
-PAYLOAD_BASE, PAYLOAD_MAX = env_int('PAYLOAD_BASE', 0xF0000000), 0x04000000
+PAYLOAD_BASE, PAYLOAD_MAX = env_int('PAYLOAD_BASE', 0xF0000000), env_int('PAYLOAD_MAX', 0x04000000)
 
 ap = argparse.ArgumentParser()
 ap.add_argument('-p', '--payload')
