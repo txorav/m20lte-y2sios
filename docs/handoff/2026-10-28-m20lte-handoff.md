@@ -23,10 +23,10 @@ Milestones **M0 through M4** of the implementation plan have been completed and 
 | **M2** | XNU Loader | Dynamic staging, Mach-O bounds audit, fastboot fix | **COMPLETE** | Static analysis & path verification complete. |
 | **M3** | Display Driver | Exynos 7904 DECON/DSIM addresses, CPU-copy mode | **COMPLETE** | Tunables clamp hardware accel to CPU blit on `gSoc=2`. |
 | **M4** | Monolithic Userland | APFS root without iOS launchd (`M20_BRINGUP=1`) | **COMPLETE** | `bash kernel/tools/m20-root-check.sh` passes. |
-| **M5** | eMMC Storage | Synopsys DesignWare MMC (`dwmmc0`) XNU driver | **PENDING** | Next priority (replaces shared-page UFS). |
-| **M6** | Power & Buttons | S2MPU08 PMIC, volume/power keys via GPIO | **PENDING** | Blocked on M5. |
-| **M7** | Touchscreen | Himax HX83112A I2C driver | **PENDING** | Blocked on M5. |
-| **M8** | Standalone Boot | Boot without USB cable, persistent filesystem | **PENDING** | Post-userland. |
+| **M5** | Keys & Input | Power / Vol Up / Vol Down via Exynos 7904 Alive pinctrl | **COMPLETE** | `redwood_exynos_keys.c` maps `gpa1-5/6/7` on `soc=2`. |
+| **M6** | eMMC Storage | Resident UEFI shared-page block service (`ufs=2`) | **ARCHITECTURE & PATH VERIFIED** | `redwood_ufs.c` read-only root mount supported. |
+| **M7** | Touch & Battery | Himax HX83112A touch + S2MU004 fuel gauge & charger | **DESIGN & REGISTER SPEC COMPLETE** | See `docs/plans/11-m20lte-touch-battery.md`. |
+| **M8** | Standalone Boot | Persistent flash boot without USB or host computer | **BLUEPRINT READY** | See `docs/plans/12-m20lte-emmc-storage.md`. |
 
 ---
 

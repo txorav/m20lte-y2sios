@@ -17,6 +17,8 @@ and what counts as done.
 | [08-audio.md](08-audio.md) | speakers through ABOX + CS35L41 amps | open: RDMA3 reads no frames |
 | [09-standalone.md](09-standalone.md) | iOS as the only OS: menu, USB/Wi-Fi logs, flash root, HFS+ data | done (warm boot after a return open) |
 | [10-mali2metal.md](10-mali2metal.md) | **mali2metal**: Metal from evidence; the m2m channel and the loop | **current** |
+| [11-m20lte-touch-battery.md](11-m20lte-touch-battery.md) | **m20lte Touch & Battery**: Himax HX83112A + S2MU004 PMIC | **m20lte M7** |
+| [12-m20lte-emmc-storage.md](12-m20lte-emmc-storage.md) | **m20lte eMMC Storage**: DesignWare dwmmc0 + block service | **m20lte M6** |
 
 Current state (2026‑10‑27): all eight cores, governor, thermal steps and idle power-down done; frame pacing (20-25 % of frames late) and sound open; see the run log in [10-mali2metal.md](10-mali2metal.md). Order at the end of 2026‑10‑25: Wi‑Fi (read the W2/W3 run → W4 → W5) and Bluetooth (B1/B2 → B3) in parallel → display D4/D5 → sound (A2 → A6). Full handover: [../history/PROGRESS2510.md](../history/PROGRESS2510.md).
 

@@ -34,8 +34,14 @@ extern void redwood_sync_filesystems(void);     /* bsd/dev/redwood_ufs.c */
 
 #define POLL_MS         16
 #define ESCAPE_MS       3000
-#define BANK_GPA0       0x00U
-#define BANK_GPA2       0x40U
+
+/* Exynos 990 (y2s): Alive pinctrl 0x15850000; Exynos 7904 (m20lte): Alive pinctrl 0x11CB0000 */
+#define PINCTRL_ALIVE_Y2S     0x15850000U
+#define PINCTRL_ALIVE_M20LTE  0x11CB0000U
+
+#define BANK_GPA0_Y2S   0x00U
+#define BANK_GPA2_Y2S   0x40U
+#define BANK_GPA1_M20   0x60U
 
 static struct key {
 	const char         *name;
@@ -48,9 +54,9 @@ static struct key {
 	uint64_t            since;
 	uint32_t            presses;
 } keys[] = {
-	{ .name = "power", .bank_offset = BANK_GPA2, .pin = 4, .record = REDWOOD_BUTTON_LOCK },
-	{ .name = "volume up", .bank_offset = BANK_GPA0, .pin = 3, .record = REDWOOD_BUTTON_VOLUME_UP },
-	{ .name = "volume down", .bank_offset = BANK_GPA0, .pin = 4, .record = REDWOOD_BUTTON_VOLUME_DOWN },
+	{ .name = "power", .bank_offset = BANK_GPA2_Y2S, .pin = 4, .record = REDWOOD_BUTTON_LOCK },
+	{ .name = "volume up", .bank_offset = BANK_GPA0_Y2S, .pin = 3, .record = REDWOOD_BUTTON_VOLUME_UP },
+	{ .name = "volume down", .bank_offset = BANK_GPA0_Y2S, .pin = 4, .record = REDWOOD_BUTTON_VOLUME_DOWN },
 };
 
 #define KEY_POWER       0
@@ -91,12 +97,23 @@ key_look(struct key *k, bool pressed)
 static void
 keys_thread(__unused void *parameter, __unused wait_result_t result)
 {
-	uint32_t escape = 1, i;
+	uint32_t escape = 1, i, soc = 0;
+	uint32_t pinctrl_alive = PINCTRL_ALIVE_Y2S;
 	uint64_t both_since = 0, ms;
 
 	PE_parse_boot_argn("keys_escape", &escape, sizeof(escape));
+	if (!PE_parse_boot_argn("keys_soc", &soc, sizeof(soc))) {
+		PE_parse_boot_argn("soc", &soc, sizeof(soc));
+	}
+	if (soc == 2) {
+		pinctrl_alive = PINCTRL_ALIVE_M20LTE;
+		keys[0].bank_offset = BANK_GPA1_M20; keys[0].pin = 7; /* power: gpa1-7 */
+		keys[1].bank_offset = BANK_GPA1_M20; keys[1].pin = 5; /* volume up: gpa1-5 */
+		keys[2].bank_offset = BANK_GPA1_M20; keys[2].pin = 6; /* volume down: gpa1-6 */
+		printf("keys: m20lte pin map configured (gpa1-5/6/7 @ 0x%08x)\n", pinctrl_alive);
+	}
 	for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
-		keys[i].bank = redwood_gpio_bank(REDWOOD_PINCTRL_ALIVE, keys[i].bank_offset);
+		keys[i].bank = redwood_gpio_bank(pinctrl_alive, keys[i].bank_offset);
 		keys[i].last = redwood_gpio_get(keys[i].bank, keys[i].pin) == 0;
 	}
 	printf("keys: power %s, volume up %s, volume down %s (polled every %u ms)\n",
