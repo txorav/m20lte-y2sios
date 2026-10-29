@@ -1853,8 +1853,14 @@ redwood_ufs_root(void)
 		return NODEV;
 	}
 	part_bytes = ufs_part_bytes(part);
-	if (!ufs_native_on || ufs_lun[part] == 0xff) {
-		ufs_log("ufs: root: %s is not read by this kernel's own driver: no root from it\n", arg);
+	/*
+	 * m20lte (and any loader-backed storage) does not have a native UFS driver: it reads
+	 * through the block page, and ufs_read() above does that whenever ufs_native_on is false.
+	 * Accept such a root as long as the partition came from the loader's own table.
+	 */
+	if ((ufs_native_on ? (ufs_lun[part] == 0xff) : !(ufs_page != NULL && ufs_ready && part < ufs_parts))) {
+		ufs_log("ufs: root: %s is not readable (%s): no root from it\n", arg,
+		    ufs_native_on ? "native driver rejected it" : "no loader block service");
 		return NODEV;
 	}
 	if (size == 0 || (off & 4095) || (size & 4095) || off + size > part_bytes) {
@@ -1871,8 +1877,8 @@ redwood_ufs_root(void)
 	ufs_root_size = size;
 	ufs_root_dev = makedev(major, 0);
 	(void)devfs_make_node(ufs_root_dev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "ufs_root");
-	ufs_log("ufs: root: /dev/ufs_root is %s+%llx, %llu MB, read only, through this kernel's own driver\n", arg, off,
-	    size >> 20);
+	ufs_log("ufs: root: /dev/ufs_root is %s+%llx, %llu MB, read only, through %s\n", arg, off,
+	    size >> 20, ufs_native_on ? "this kernel's own driver" : "the loader's block service");
 	return ufs_root_dev;
 }
 

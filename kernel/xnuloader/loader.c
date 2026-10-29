@@ -20,7 +20,7 @@
  * so the stock boot shim delivers it together with the FD (no custom shim, and
  * no image_size mismatch for the bootloader).
  */
-#define PAYLOAD_BASE        0xE8100000ULL         /* FD base 0xE8000000 + 0x100000 */
+#define PAYLOAD_BASE        0x8F100000ULL         /* m20 FD base 0x8F000000 + 0x100000 */
 #define PAYLOAD_MAX_SIZE    0x00080000ULL         /* 512 KB, inside the 2 MB FD region */
 #define PAYLOAD_MAGIC       0x50554E58u /* "XNUP" */
 
@@ -41,14 +41,14 @@ struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
 #define PAGE_SIZE_MAX       0x4000ULL
 
 #define LOG_PARTITION       u"recovery"   /* y2s has no logdump: park the log in the recovery image */
-#define LOG_OFFSET          0x01000000ULL /* 16 MB into recovery: clear of the UEFI image (0) and the kernel (32 MB) */
+#define LOG_OFFSET          0x00400000ULL /* m20: recovery +4 MB; 8 MiB log, clear of kernel at recovery +12 MB */
 #define CHECKPOINT_SELFTEST 999
 #define PANIC_LOG_SIZE      0x80000u
 #define NVRAM_BANK_SIZE     0x2000u
 #define PANIC_LOG_BASE      (PAYLOAD_BASE + PAYLOAD_MAX_SIZE)
 /* Staging area for images the host sends over USB (kernel, root image). */
 #define DOWNLOAD_BASE       0xF0000000ULL
-#define DOWNLOAD_MAX_SIZE   0x01000000ULL         /* 16 MB: up to the display at 0xF1000000 */
+#define DOWNLOAD_MAX_SIZE   0x01800000ULL         /* 24 MB: m20 kernel staging, clear of the display */
 
 /* ------------------------------------------------------------------------ */
 /* XNU structures (pexpert/pexpert/arm64/boot.h, mach-o/loader.h)           */
@@ -694,6 +694,19 @@ static const struct platform platform_y2s = {
 	.watch_quietly = 1,
 };
 
+static const uint64_t platform_m20lte_mpidrs[8] = {
+	0x100, 0x101, 0x102, 0x103, 0x200, 0x201, 0x0, 0x1
+};
+
+static const struct platform platform_m20lte = {
+	.name = "m20lte", .io_base = 0x10000000, .io_size = 0x08000000,
+	.gic_dist = 0x12301000, .gic_redist = 0x12302000, .gic_v2 = 1, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .mpidrs = platform_m20lte_mpidrs,
+	.small_cores = 0x3f,
+	.fb_base = 0xEC000000,
+	.watch_quietly = 1,
+};
+
 /*
  * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
  * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
@@ -702,6 +715,7 @@ static const struct platform platform_y2s = {
 static const struct platform *const platforms[] = {
 	&platform_redwood,
 	&platform_y2s,
+	&platform_m20lte,
 };
 
 /* ------------------------------------------------------------------------ */
@@ -2798,6 +2812,7 @@ struct payload_info {
 	int usb_mode;
 	char kpart[32];                 /* where the kernel lives on storage, if not in the payload */
 	uint64_t koff;                  /* byte offset of the kernel inside that partition */
+	uint64_t ksize;                 /* kernel bytes to read when kpart= (0: staging default) */
 	char rpart[32];                 /* same for the root ramdisk (md1) */
 	uint64_t roff, rsize;
 	char rdpart[32];                /* same for the resident root image (md0) */
@@ -2827,6 +2842,10 @@ parse_payload(struct payload_info *pi, int verbose)
 	pi->cmdline = "";
 	if (ph->magic != PAYLOAD_MAGIC) {
 		print("no payload at %x (magic %x)\n", PAYLOAD_BASE, (uint64_t)ph->magic);
+		return 0;
+	}
+	if (ph->size == 0 || ph->size > PAYLOAD_MAX_SIZE - sizeof(*ph)) {
+		print("payload size %x is out of bounds (max %x)\n", (uint64_t)ph->size, PAYLOAD_MAX_SIZE);
 		return 0;
 	}
 	const uint8_t *p = (const uint8_t *)(ph + 1), *pend = p + ph->size;
@@ -2864,6 +2883,8 @@ parse_payload(struct payload_info *pi, int verbose)
 			pi->kpart[k] = 0;
 		} else if (str_eq(e->name, "koff")) {
 			pi->koff = parse_number(text, 16);
+		} else if (str_eq(e->name, "ksize")) {
+			pi->ksize = parse_number(text, 16);
 		} else if (str_eq(e->name, "rpart")) {
 			unsigned k = 0;
 			while (k + 1 < sizeof(pi->rpart) && text[k] != 0) {
@@ -2887,7 +2908,12 @@ parse_payload(struct payload_info *pi, int verbose)
 		} else if (str_eq(e->name, "rdsize")) {
 			pi->rdsize = parse_number(text, 16);
 		}
-		p += sizeof(*e) + ((e->size + 15) & ~15u);
+		uint64_t adv = sizeof(*e) + ((uint64_t)e->size + 15) & ~15u;
+		if ((const uint8_t *)(p + adv) < p || p + adv > pend) {
+			print("payload entry %x overruns the payload: ignored\n", (uint64_t)e->size);
+			break;
+		}
+		p += adv;
 	}
 	return 1;
 }
@@ -3103,8 +3129,22 @@ choose_window(const struct payload_info *pi)
 	}
 	print("largest free block %x size %x\n", best_base, best_size);
 	if (pi->forced_base != 0) {
-		best_base = pi->forced_base;
-		best_size = MAX_MEM_SIZE;
+		int found = 0;
+		for (uint64_t off = 0; off < map_size; off += desc_size) {
+			efi_memory_descriptor *d = (efi_memory_descriptor *)(map_buf + off);
+			uint64_t lo = d->phys_start, hi = d->phys_start + (d->pages << 12);
+			if (d->type == EfiConventionalMemory && lo <= pi->forced_base && pi->forced_base < hi) {
+				best_base = (pi->forced_base + BASE_ALIGN - 1) & ~(BASE_ALIGN - 1);
+				best_size = (hi > best_base) ? (hi - best_base) : 0;
+				found = 1;
+				break;
+			}
+		}
+		if (!found) {
+			print("forced physbase %x is not inside a conventional block: ignored\n",
+			    pi->forced_base);
+			/* fall through to the chosen window */
+		}
 	}
 	if (best_size > MAX_MEM_SIZE) {
 		best_size = MAX_MEM_SIZE;
@@ -3161,15 +3201,16 @@ static int
 load_kernel_from_partition(const char *part, uint64_t off)
 {
 	uint8_t *dest = (uint8_t *)DOWNLOAD_BASE;
+	uint64_t size = DOWNLOAD_MAX_SIZE;
 
-	if (!read_partition_into(part, off, dest, DOWNLOAD_MAX_SIZE)) {
+	if (!read_partition_into(part, off, dest, size)) {
 		return 0;
 	}
 	if (*(const uint32_t *)dest != 0xfeedfacf) {
 		print("kernel: bad Mach-O magic %x at '%s'+%x\n", (uint64_t)*(const uint32_t *)dest, part, off);
 		return 0;
 	}
-	print("kernel: read %x bytes from '%s' at %x\n", (uint64_t)DOWNLOAD_MAX_SIZE, part, off);
+	print("kernel: read up to %x bytes from '%s' at %x (ksize=0 means the staging default)\n", size, part, off);
 	return 1;
 }
 
@@ -3337,6 +3378,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 
 	/* "bootcpu=N" among the kernel's arguments: run it on core N (see run_on_other_cpu) */
 	uint64_t this_mpidr = READ_SYSREG(MPIDR_EL1) & 0xFFFFFF, kernel_mpidr = this_mpidr;
+	int bootcpu_auto = 0;
 	/* "cpus=N" or "cpumask=M" there too: the kernel may have more cores than the one it starts on */
 	int more_cores = 0, battery_requested = 0, ufs_requested = 0;
 	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (bsd/dev/redwood_torch.c) */
@@ -3350,7 +3392,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	block_write_requested = 0;
 	block_write_part = -1;
 	for (const char *c = pi.cmdline; *c; c++) {
-		if (starts_with(c, "bootcpu=") && (c == pi.cmdline || c[-1] == ' ') && c[8] >= '0' && c[8] <= '7') {
+		if (starts_with(c, "bootcpu=auto") && (c == pi.cmdline || c[-1] == ' ') &&
+		    (c[13] == 0 || c[13] == ' ')) {
+			bootcpu_auto = 1;
+		} else if (starts_with(c, "bootcpu=") && (c == pi.cmdline || c[-1] == ' ') && c[8] >= '0' && c[8] <= '7') {
 			kernel_mpidr = plat_mpidr_of(PLAT, c[8] - '0');
 		}
 		more_cores |= (starts_with(c, "cpus=") || starts_with(c, "cpumask=")) && (c == pi.cmdline || c[-1] == ' ');
@@ -3368,6 +3413,17 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		    (c[11] == 0 || c[11] == ' ');
 		hc_requested |= starts_with(c, "ufs_native=") && (c == pi.cmdline || c[-1] == ' ') && c[11] >= '1' &&
 		    c[11] <= '9';
+	}
+	if (bootcpu_auto && kernel_mpidr == this_mpidr) {
+		/* choose the first core that is not the one the loader is on */
+		for (int i = 0; i < PLAT->cores; i++) {
+			uint64_t mp = plat_mpidr_of(PLAT, i);
+			if (mp != this_mpidr) {
+				kernel_mpidr = mp;
+				print("bootcpu=auto: loader core %x, kernel core %x (index %d)\n", this_mpidr, kernel_mpidr, (uint64_t)i);
+				break;
+			}
+		}
 	}
 	if (battery_requested) {
 		charger_start();
